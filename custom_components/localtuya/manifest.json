@@ -1,14 +1,14 @@
 {
   "domain": "localtuya",
-  "name": "LocalTuya integration",
+  "name": "LocalTuya HA 2026 fixes",
   "codeowners": [
-    "@rospogrigio", "@postlund"
+    "@Hashim-K"
   ],
   "config_flow": true,
   "dependencies": [],
-  "documentation": "https://github.com/rospogrigio/localtuya/",
+  "documentation": "https://github.com/Hashim-K/localtuya/",
   "iot_class": "local_push",
-  "issue_tracker": "https://github.com/rospogrigio/localtuya/issues",
+  "issue_tracker": "https://github.com/Hashim-K/localtuya/issues",
   "requirements": [],
-  "version": "5.2.3"
+  "version": "5.2.6-hk.1"
 }

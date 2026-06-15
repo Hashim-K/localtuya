@@ -8,6 +8,7 @@ import homeassistant.util.color as color_util
 import voluptuous as vol
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
+    ATTR_COLOR_TEMP_KELVIN,
     ATTR_EFFECT,
     ATTR_HS_COLOR,
     DOMAIN,
@@ -170,11 +171,11 @@ class LocaltuyaLight(LocalTuyaEntity, LightEntity):
             CONF_BRIGHTNESS_UPPER, DEFAULT_UPPER_BRIGHTNESS
         )
         self._upper_color_temp = self._upper_brightness
-        self._max_mired = color_util.color_temperature_kelvin_to_mired(
-            self._config.get(CONF_COLOR_TEMP_MIN_KELVIN, DEFAULT_MIN_KELVIN)
+        self._min_kelvin = self._config.get(
+            CONF_COLOR_TEMP_MIN_KELVIN, DEFAULT_MIN_KELVIN
         )
-        self._min_mired = color_util.color_temperature_kelvin_to_mired(
-            self._config.get(CONF_COLOR_TEMP_MAX_KELVIN, DEFAULT_MAX_KELVIN)
+        self._max_kelvin = self._config.get(
+            CONF_COLOR_TEMP_MAX_KELVIN, DEFAULT_MAX_KELVIN
         )
         self._color_temp_reverse = self._config.get(
             CONF_COLOR_TEMP_REVERSE, DEFAULT_COLOR_TEMP_REVERSE
@@ -224,32 +225,29 @@ class LocaltuyaLight(LocalTuyaEntity, LightEntity):
         return None
 
     @property
-    def color_temp(self):
-        """Return the color_temp of the light."""
+    def color_temp_kelvin(self):
+        """Return the color temperature of the light in kelvin."""
         if self.has_config(CONF_COLOR_TEMP) and self.is_white_mode:
-            color_temp_value = (
-                self._upper_color_temp - self._color_temp
-                if self._color_temp_reverse
-                else self._color_temp
-            )
+            color_temp = self._color_temp
+            if self._color_temp_reverse:
+                color_temp = self._upper_color_temp - color_temp
             return int(
-                self._max_mired
-                - (
-                    ((self._max_mired - self._min_mired) / self._upper_color_temp)
-                    * color_temp_value
-                )
+                self._min_kelvin
+                + color_temp
+                * (self._max_kelvin - self._min_kelvin)
+                / self._upper_color_temp
             )
         return None
 
     @property
-    def min_mireds(self):
-        """Return color temperature min mireds."""
-        return self._min_mired
+    def min_color_temp_kelvin(self) -> int:
+        """Return the minimum color temperature in kelvin."""
+        return self._min_kelvin
 
     @property
-    def max_mireds(self):
-        """Return color temperature max mireds."""
-        return self._max_mired
+    def max_color_temp_kelvin(self) -> int:
+        """Return the maximum color temperature in kelvin."""
+        return self._max_kelvin
 
     @property
     def effect(self):
@@ -429,21 +427,28 @@ class LocaltuyaLight(LocalTuyaEntity, LightEntity):
                 states[self._config.get(CONF_COLOR)] = color
                 states[self._config.get(CONF_COLOR_MODE)] = MODE_COLOR
 
-        if ColorMode.COLOR_TEMP in kwargs and ColorMode.COLOR_TEMP in self.supported_color_modes:
+        if (
+            ATTR_COLOR_TEMP_KELVIN in kwargs
+            and ColorMode.COLOR_TEMP in self.supported_color_modes
+        ):
             if brightness is None:
-                brightness = self._brightness
-            mired = int(kwargs[ColorMode.COLOR_TEMP])
-            if self._color_temp_reverse:
-                mired = self._max_mired - (mired - self._min_mired)
-            if mired < self._min_mired:
-                mired = self._min_mired
-            elif mired > self._max_mired:
-                mired = self._max_mired
+                brightness = (
+                    self._brightness
+                    if self._brightness is not None
+                    else self._upper_brightness
+                )
+            kelvin = int(kwargs[ATTR_COLOR_TEMP_KELVIN])
+            if kelvin < self._min_kelvin:
+                kelvin = self._min_kelvin
+            elif kelvin > self._max_kelvin:
+                kelvin = self._max_kelvin
             color_temp = int(
                 self._upper_color_temp
-                - (self._upper_color_temp / (self._max_mired - self._min_mired))
-                * (mired - self._min_mired)
+                * (kelvin - self._min_kelvin)
+                / (self._max_kelvin - self._min_kelvin)
             )
+            if self._color_temp_reverse:
+                color_temp = self._upper_color_temp - color_temp
             states[self._config.get(CONF_COLOR_MODE)] = MODE_WHITE
             states[self._config.get(CONF_BRIGHTNESS)] = brightness
             states[self._config.get(CONF_COLOR_TEMP)] = color_temp
