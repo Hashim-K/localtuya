@@ -513,10 +513,10 @@ class LocalTuyaEntity(RestoreEntity, pytuya.ContextualLogger):
         """Return if device is available or not."""
         return str(self._dp_id) in self._status
 
-    def dps(self, dp_index):
+    def dps(self, dp_index, *, warn=True):
         """Return cached value for DPS index."""
         value = self._status.get(str(dp_index))
-        if value is None:
+        if value is None and warn:
             self.warning(
                 "Entity %s is requesting unknown DPS index %s",
                 self.entity_id,
@@ -525,7 +525,7 @@ class LocalTuyaEntity(RestoreEntity, pytuya.ContextualLogger):
 
         return value
 
-    def dps_conf(self, conf_item):
+    def dps_conf(self, conf_item, *, warn=True):
         """Return value of datapoint for user specified config item.
 
         This method looks up which DP a certain config item uses based on
@@ -538,7 +538,7 @@ class LocalTuyaEntity(RestoreEntity, pytuya.ContextualLogger):
                 self.entity_id,
                 conf_item,
             )
-        return self.dps(dp_index)
+        return self.dps(dp_index, warn=warn)
 
     def status_updated(self):
         """Device status was updated.

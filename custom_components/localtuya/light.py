@@ -341,7 +341,7 @@ class LocaltuyaLight(LocalTuyaEntity, LightEntity):
 
     def __get_color_mode(self):
         return (
-            self.dps_conf(CONF_COLOR_MODE)
+            self.dps_conf(CONF_COLOR_MODE, warn=False)
             if self.has_config(CONF_COLOR_MODE)
             else self._modes.white
         )
@@ -445,7 +445,12 @@ class LocaltuyaLight(LocalTuyaEntity, LightEntity):
                 color_temp = self._upper_color_temp - color_temp
             if self.has_config(CONF_COLOR):
                 states.pop(self._config.get(CONF_COLOR), None)
-            if not self.is_white_mode:
+            current_color_mode = (
+                self.dps_conf(CONF_COLOR_MODE, warn=False)
+                if self.has_config(CONF_COLOR_MODE)
+                else self._modes.white
+            )
+            if current_color_mode != self._modes.white:
                 states[self._config.get(CONF_COLOR_MODE)] = self._modes.white
             if (
                 ATTR_BRIGHTNESS in kwargs
