@@ -431,12 +431,6 @@ class LocaltuyaLight(LocalTuyaEntity, LightEntity):
             ATTR_COLOR_TEMP_KELVIN in kwargs
             and ColorMode.COLOR_TEMP in self.supported_color_modes
         ):
-            if brightness is None:
-                brightness = (
-                    self._brightness
-                    if self._brightness is not None
-                    else self._upper_brightness
-                )
             kelvin = int(kwargs[ATTR_COLOR_TEMP_KELVIN])
             if kelvin < self._min_kelvin:
                 kelvin = self._min_kelvin
@@ -449,8 +443,16 @@ class LocaltuyaLight(LocalTuyaEntity, LightEntity):
             )
             if self._color_temp_reverse:
                 color_temp = self._upper_color_temp - color_temp
-            states[self._config.get(CONF_COLOR_MODE)] = MODE_WHITE
-            states[self._config.get(CONF_BRIGHTNESS)] = brightness
+            if self.has_config(CONF_COLOR):
+                states.pop(self._config.get(CONF_COLOR), None)
+            if not self.is_white_mode:
+                states[self._config.get(CONF_COLOR_MODE)] = self._modes.white
+            if (
+                ATTR_BRIGHTNESS in kwargs
+                and brightness is not None
+                and self.has_config(CONF_BRIGHTNESS)
+            ):
+                states[self._config.get(CONF_BRIGHTNESS)] = brightness
             states[self._config.get(CONF_COLOR_TEMP)] = color_temp
         await self._device.set_dps(states)
 

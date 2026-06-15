@@ -112,7 +112,7 @@ class LocaltuyaSelect(LocalTuyaEntity, SelectEntity):
                 ]
             except Exception:  # pylint: disable=broad-except
                 # Friendly value couldn't be mapped
-                self._state_friendly = state
+                self._state_friendly = str(state)
 
     # Default value is the first option
     def entity_default_value(self):

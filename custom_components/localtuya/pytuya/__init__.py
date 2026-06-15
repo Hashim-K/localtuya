@@ -16,7 +16,7 @@ Classes
 
 Functions
    json = status()          # returns json payload
-   set_version(version)     #  3.1 [default], 3.2, 3.3 or 3.4
+   set_version(version)     #  3.1 [default], 3.2, 3.3, 3.4 or 3.5
    detect_available_dps()   # returns a list of available dps provided by the device
    update_dps(dps)          # sends update dps command
    add_dps_to_request(dp_index)  # adds dp_index to the list of dps used by the
@@ -29,7 +29,7 @@ Functions
     For protocol reverse engineering
   * PyTuya https://github.com/clach04/python-tuya by clach04
     The origin of this python module (now abandoned)
-  * Tuya Protocol 3.4 Support by uzlonewolf
+  * Tuya Protocol 3.4 and 3.5 Support by uzlonewolf
     Enhancement to TuyaMessage logic for multi-payload messages and Tuya Protocol 3.4 support
   * TinyTuya https://github.com/jasonacox/tinytuya by jasonacox
     Several CLI tools and code for Tuya devices
@@ -58,14 +58,23 @@ __author__ = "rospogrigio"
 _LOGGER = logging.getLogger(__name__)
 
 # Tuya Packet Format
-TuyaHeader = namedtuple("TuyaHeader", "prefix seqno cmd length")
+try:
+    TuyaHeader = namedtuple(
+        "TuyaHeader", "prefix seqno cmd length total_length", defaults=(None,)
+    )
+except TypeError:
+    TuyaHeader = namedtuple("TuyaHeader", "prefix seqno cmd length total_length")
 MessagePayload = namedtuple("MessagePayload", "cmd payload")
 try:
     TuyaMessage = namedtuple(
-        "TuyaMessage", "seqno cmd retcode payload crc crc_good", defaults=(True,)
+        "TuyaMessage",
+        "seqno cmd retcode payload crc crc_good prefix iv",
+        defaults=(True, 0x000055AA, None),
     )
-except Exception:
-    TuyaMessage = namedtuple("TuyaMessage", "seqno cmd retcode payload crc crc_good")
+except TypeError:
+    TuyaMessage = namedtuple(
+        "TuyaMessage", "seqno cmd retcode payload crc crc_good prefix iv"
+    )
 
 # TinyTuya Error Response Codes
 ERR_JSON = 900
@@ -138,19 +147,27 @@ LAN_EXT_STREAM = 0x40  # 64 # FRM_LAN_EXT_STREAM
 PROTOCOL_VERSION_BYTES_31 = b"3.1"
 PROTOCOL_VERSION_BYTES_33 = b"3.3"
 PROTOCOL_VERSION_BYTES_34 = b"3.4"
+PROTOCOL_VERSION_BYTES_35 = b"3.5"
 
 PROTOCOL_3x_HEADER = 12 * b"\x00"
 PROTOCOL_33_HEADER = PROTOCOL_VERSION_BYTES_33 + PROTOCOL_3x_HEADER
 PROTOCOL_34_HEADER = PROTOCOL_VERSION_BYTES_34 + PROTOCOL_3x_HEADER
+PROTOCOL_35_HEADER = PROTOCOL_VERSION_BYTES_35 + PROTOCOL_3x_HEADER
 MESSAGE_HEADER_FMT = ">4I"  # 4*uint32: prefix, seqno, cmd, length [, retcode]
 MESSAGE_RECV_HEADER_FMT = ">5I"  # 4*uint32: prefix, seqno, cmd, length, retcode
+MESSAGE_HEADER_6699_FMT = ">IHIII"  # prefix, unknown, seqno, cmd, length
 MESSAGE_RETCODE_FMT = ">I"  # retcode for received messages
 MESSAGE_END_FMT = ">2I"  # 2*uint32: crc, suffix
 MESSAGE_END_FMT_HMAC = ">32sI"  # 32s:hmac, uint32:suffix
+MESSAGE_END_FMT_6699 = ">16sI"  # 16s:gcm tag, uint32:suffix
 PREFIX_VALUE = 0x000055AA
 PREFIX_BIN = b"\x00\x00U\xaa"
 SUFFIX_VALUE = 0x0000AA55
 SUFFIX_BIN = b"\x00\x00\xaaU"
+PREFIX_6699_VALUE = 0x00006699
+PREFIX_6699_BIN = b"\x00\x00f\x99"
+SUFFIX_6699_VALUE = 0x00009966
+SUFFIX_6699_BIN = b"\x00\x00\x99f"
 NO_PROTOCOL_HEADER_CMDS = [
     DP_QUERY,
     DP_QUERY_NEW,
@@ -215,6 +232,13 @@ payload_dict = {
         },
         DP_QUERY: {"command_override": DP_QUERY_NEW},
     },
+    "v3.5": {
+        CONTROL: {
+            "command_override": CONTROL_NEW,  # Uses CONTROL_NEW command
+            "command": {"protocol": 5, "t": "int", "data": ""},
+        },
+        DP_QUERY: {"command_override": DP_QUERY_NEW},
+    },
 }
 
 
@@ -265,77 +289,140 @@ class ContextualLogger:
 
 def pack_message(msg, hmac_key=None):
     """Pack a TuyaMessage into bytes."""
-    end_fmt = MESSAGE_END_FMT_HMAC if hmac_key else MESSAGE_END_FMT
-    # Create full message excluding CRC and suffix
-    buffer = (
-        struct.pack(
-            MESSAGE_HEADER_FMT,
-            PREFIX_VALUE,
-            msg.seqno,
-            msg.cmd,
-            len(msg.payload) + struct.calcsize(end_fmt),
-        )
-        + msg.payload
-    )
-    if hmac_key:
-        crc = hmac.new(hmac_key, buffer, sha256).digest()
+    if msg.prefix == PREFIX_VALUE:
+        header_fmt = MESSAGE_HEADER_FMT
+        end_fmt = MESSAGE_END_FMT_HMAC if hmac_key else MESSAGE_END_FMT
+        msg_len = len(msg.payload) + struct.calcsize(end_fmt)
+        header_data = (msg.prefix, msg.seqno, msg.cmd, msg_len)
+    elif msg.prefix == PREFIX_6699_VALUE:
+        if not hmac_key:
+            raise TypeError("key must be provided to pack 6699-format messages")
+        header_fmt = MESSAGE_HEADER_6699_FMT
+        end_fmt = MESSAGE_END_FMT_6699
+        msg_len = len(msg.payload) + (struct.calcsize(end_fmt) - 4) + 12
+        if isinstance(msg.retcode, int):
+            msg_len += struct.calcsize(MESSAGE_RETCODE_FMT)
+        header_data = (msg.prefix, 0, msg.seqno, msg.cmd, msg_len)
     else:
-        crc = binascii.crc32(buffer) & 0xFFFFFFFF
-    # Calculate CRC, add it together with suffix
-    buffer += struct.pack(end_fmt, crc, SUFFIX_VALUE)
+        raise ValueError(
+            "pack_message() cannot handle message format %08X" % msg.prefix
+        )
+
+    buffer = struct.pack(header_fmt, *header_data)
+
+    if msg.prefix == PREFIX_6699_VALUE:
+        cipher = AESCipher(hmac_key)
+        raw = msg.payload
+        if isinstance(msg.retcode, int):
+            raw = struct.pack(MESSAGE_RETCODE_FMT, msg.retcode) + raw
+        buffer += (
+            cipher.encrypt(
+                raw,
+                use_base64=False,
+                pad=False,
+                iv=True if not msg.iv else msg.iv,
+                header=buffer[4:],
+            )
+            + SUFFIX_6699_BIN
+        )
+    else:
+        buffer += msg.payload
+        if hmac_key:
+            crc = hmac.new(hmac_key, buffer, sha256).digest()
+        else:
+            crc = binascii.crc32(buffer) & 0xFFFFFFFF
+        # Calculate CRC, add it together with suffix
+        buffer += struct.pack(end_fmt, crc, SUFFIX_VALUE)
     return buffer
 
 
 def unpack_message(data, hmac_key=None, header=None, no_retcode=False, logger=None):
     """Unpack bytes into a TuyaMessage."""
-    end_fmt = MESSAGE_END_FMT_HMAC if hmac_key else MESSAGE_END_FMT
-    # 4-word header plus return code
-    header_len = struct.calcsize(MESSAGE_HEADER_FMT)
-    retcode_len = 0 if no_retcode else struct.calcsize(MESSAGE_RETCODE_FMT)
-    end_len = struct.calcsize(end_fmt)
-    headret_len = header_len + retcode_len
-
-    if len(data) < headret_len + end_len:
-        logger.debug(
-            "unpack_message(): not enough data to unpack header! need %d but only have %d",
-            headret_len + end_len,
-            len(data),
-        )
-        raise DecodeError("Not enough data to unpack header")
-
     if header is None:
         header = parse_header(data)
 
-    if len(data) < header_len + header.length:
+    if header.prefix == PREFIX_VALUE:
+        header_len = struct.calcsize(MESSAGE_HEADER_FMT)
+        end_fmt = MESSAGE_END_FMT_HMAC if hmac_key else MESSAGE_END_FMT
+        retcode_len = 0 if no_retcode else struct.calcsize(MESSAGE_RETCODE_FMT)
+        msg_len = header_len + header.length
+    elif header.prefix == PREFIX_6699_VALUE:
+        if not hmac_key:
+            raise TypeError("key must be provided to unpack 6699-format messages")
+        header_len = struct.calcsize(MESSAGE_HEADER_6699_FMT)
+        end_fmt = MESSAGE_END_FMT_6699
+        retcode_len = 0
+        msg_len = header_len + header.length + len(SUFFIX_6699_BIN)
+    else:
+        raise ValueError(
+            "unpack_message() cannot handle message format %08X" % header.prefix
+        )
+
+    if len(data) < msg_len:
         logger.debug(
             "unpack_message(): not enough data to unpack payload! need %d but only have %d",
-            header_len + header.length,
+            msg_len,
             len(data),
         )
         raise DecodeError("Not enough data to unpack payload")
 
+    end_len = struct.calcsize(end_fmt)
+    headret_len = header_len + retcode_len
     retcode = (
         0
-        if no_retcode
+        if retcode_len == 0
         else struct.unpack(MESSAGE_RETCODE_FMT, data[header_len:headret_len])[0]
     )
     # the retcode is technically part of the payload, but strip it as we do not want it here
-    payload = data[header_len + retcode_len : header_len + header.length]
+    payload = data[headret_len:msg_len]
     crc, suffix = struct.unpack(end_fmt, payload[-end_len:])
+    payload = payload[:-end_len]
 
-    if hmac_key:
+    if header.prefix == PREFIX_VALUE and hmac_key:
         have_crc = hmac.new(
             hmac_key, data[: (header_len + header.length) - end_len], sha256
         ).digest()
-    else:
+    elif header.prefix == PREFIX_VALUE:
         have_crc = (
             binascii.crc32(data[: (header_len + header.length) - end_len]) & 0xFFFFFFFF
         )
+    else:
+        iv = payload[:12]
+        payload = payload[12:]
+        try:
+            cipher = AESCipher(hmac_key)
+            payload = cipher.decrypt(
+                payload,
+                use_base64=False,
+                decode_text=False,
+                iv=iv,
+                header=data[4:header_len],
+                tag=crc,
+            )
+            have_crc = crc
+        except Exception:
+            have_crc = None
 
-    if suffix != SUFFIX_VALUE:
-        logger.debug("Suffix prefix wrong! %08X != %08X", suffix, SUFFIX_VALUE)
+        retcode_len = struct.calcsize(MESSAGE_RETCODE_FMT)
+        if (
+            no_retcode is None
+            and payload[0:1] != b"{"
+            and payload[retcode_len : retcode_len + 1] == b"{"
+        ):
+            pass
+        else:
+            retcode_len = 0
+        if retcode_len:
+            retcode = struct.unpack(MESSAGE_RETCODE_FMT, payload[:retcode_len])[0]
+            payload = payload[retcode_len:]
 
-    if crc != have_crc:
+    expected_suffix = (
+        SUFFIX_6699_VALUE if header.prefix == PREFIX_6699_VALUE else SUFFIX_VALUE
+    )
+    if suffix != expected_suffix:
+        logger.debug("Suffix prefix wrong! %08X != %08X", suffix, expected_suffix)
+
+    if have_crc is not None and crc != have_crc:
         if hmac_key:
             logger.debug(
                 "HMAC checksum wrong! %r != %r",
@@ -346,33 +433,54 @@ def unpack_message(data, hmac_key=None, header=None, no_retcode=False, logger=No
             logger.debug("CRC wrong! %08X != %08X", have_crc, crc)
 
     return TuyaMessage(
-        header.seqno, header.cmd, retcode, payload[:-end_len], crc, crc == have_crc
+        header.seqno,
+        header.cmd,
+        retcode,
+        payload,
+        crc,
+        crc == have_crc,
+        header.prefix,
+        iv if header.prefix == PREFIX_6699_VALUE else None,
     )
 
 
 def parse_header(data):
     """Unpack bytes into a TuyaHeader."""
-    header_len = struct.calcsize(MESSAGE_HEADER_FMT)
+    if len(data) < 4:
+        raise DecodeError("Not enough data to unpack header")
+
+    if data[:4] == PREFIX_6699_BIN:
+        header_fmt = MESSAGE_HEADER_6699_FMT
+    elif data[:4] == PREFIX_BIN:
+        header_fmt = MESSAGE_HEADER_FMT
+    else:
+        raise DecodeError("Header prefix wrong! %08X" % struct.unpack(">I", data[:4])[0])
+
+    header_len = struct.calcsize(header_fmt)
 
     if len(data) < header_len:
         raise DecodeError("Not enough data to unpack header")
 
-    prefix, seqno, cmd, payload_len = struct.unpack(
-        MESSAGE_HEADER_FMT, data[:header_len]
-    )
+    unpacked = struct.unpack(header_fmt, data[:header_len])
+    prefix = unpacked[0]
 
-    if prefix != PREFIX_VALUE:
-        # self.debug('Header prefix wrong! %08X != %08X', prefix, PREFIX_VALUE)
-        raise DecodeError("Header prefix wrong! %08X != %08X" % (prefix, PREFIX_VALUE))
+    if prefix == PREFIX_VALUE:
+        prefix, seqno, cmd, payload_len = unpacked
+        total_length = struct.calcsize(MESSAGE_HEADER_FMT) + payload_len
+    elif prefix == PREFIX_6699_VALUE:
+        prefix, _unknown, seqno, cmd, payload_len = unpacked
+        total_length = header_len + payload_len + len(SUFFIX_6699_BIN)
+    else:
+        raise DecodeError("Header prefix wrong! %08X" % prefix)
 
     # sanity check. currently the max payload length is somewhere around 300 bytes
-    if payload_len > 1000:
+    if payload_len > 2000:
         raise DecodeError(
-            "Header claims the packet size is over 1000 bytes! It is most likely corrupt. Claimed size: %d bytes"
+            "Header claims the packet size is over 2000 bytes! It is most likely corrupt. Claimed size: %d bytes"
             % payload_len
         )
 
-    return TuyaHeader(prefix, seqno, cmd, payload_len)
+    return TuyaHeader(prefix, seqno, cmd, payload_len, total_length)
 
 
 class AESCipher:
@@ -381,23 +489,52 @@ class AESCipher:
     def __init__(self, key):
         """Initialize a new AESCipher."""
         self.block_size = 16
+        self.key = key
         self.cipher = Cipher(algorithms.AES(key), modes.ECB(), default_backend())
 
-    def encrypt(self, raw, use_base64=True, pad=True):
+    def encrypt(self, raw, use_base64=True, pad=True, iv=False, header=None):
         """Encrypt data to be sent to device."""
-        encryptor = self.cipher.encryptor()
-        if pad:
-            raw = self._pad(raw)
-        crypted_text = encryptor.update(raw) + encryptor.finalize()
+        if iv:
+            if iv is True:
+                iv = str(time.time() * 10)[:12].encode("utf8")
+            encryptor = Cipher(algorithms.AES(self.key), modes.GCM(iv)).encryptor()
+            if header:
+                encryptor.authenticate_additional_data(header)
+            crypted_text = encryptor.update(raw) + encryptor.finalize()
+            crypted_text = iv + crypted_text + encryptor.tag
+        else:
+            encryptor = self.cipher.encryptor()
+            if pad:
+                raw = self._pad(raw)
+            crypted_text = encryptor.update(raw) + encryptor.finalize()
         return base64.b64encode(crypted_text) if use_base64 else crypted_text
 
-    def decrypt(self, enc, use_base64=True, decode_text=True):
+    def decrypt(
+        self, enc, use_base64=True, decode_text=True, iv=False, header=None, tag=None
+    ):
         """Decrypt data from device."""
-        if use_base64:
+        if not iv and use_base64:
             enc = base64.b64decode(enc)
 
-        decryptor = self.cipher.decryptor()
-        raw = self._unpad(decryptor.update(enc) + decryptor.finalize())
+        if iv:
+            if iv is True:
+                iv = enc[:12]
+                enc = enc[12:]
+            if tag is None:
+                decryptor = Cipher(
+                    algorithms.AES(self.key),
+                    modes.CTR(iv + b"\x00\x00\x00\x02"),
+                ).decryptor()
+            else:
+                decryptor = Cipher(
+                    algorithms.AES(self.key), modes.GCM(iv, tag)
+                ).decryptor()
+            if header and tag is not None:
+                decryptor.authenticate_additional_data(header)
+            raw = decryptor.update(enc) + decryptor.finalize()
+        else:
+            decryptor = self.cipher.decryptor()
+            raw = self._unpad(decryptor.update(enc) + decryptor.finalize())
         return raw.decode("utf-8") if decode_text else raw
 
     def _pad(self, data):
@@ -460,19 +597,45 @@ class MessageDispatcher(ContextualLogger):
     def add_data(self, data):
         """Add new data to the buffer and try to parse messages."""
         self.buffer += data
-        header_len = struct.calcsize(MESSAGE_RECV_HEADER_FMT)
 
         while self.buffer:
-            # Check if enough data for measage header
+            prefix_positions = [
+                pos
+                for pos in (
+                    self.buffer.find(PREFIX_BIN),
+                    self.buffer.find(PREFIX_6699_BIN),
+                )
+                if pos >= 0
+            ]
+            if not prefix_positions:
+                self.debug("Invalid prefix: %r", self.buffer)
+                self.buffer = b""
+                break
+
+            prefix_index = min(prefix_positions)
+            if prefix_index > 0:
+                self.debug("Prefix is not at start; discarding %d bytes", prefix_index)
+                self.buffer = self.buffer[prefix_index:]
+
+            header_len = (
+                struct.calcsize(MESSAGE_HEADER_6699_FMT)
+                if self.buffer.startswith(PREFIX_6699_BIN)
+                else struct.calcsize(MESSAGE_RECV_HEADER_FMT)
+            )
+
+            # Check if enough data for message header.
             if len(self.buffer) < header_len:
                 break
 
             header = parse_header(self.buffer)
-            hmac_key = self.local_key if self.version == 3.4 else None
+            if len(self.buffer) < header.total_length:
+                break
+
+            hmac_key = self.local_key if self.version >= 3.4 else None
             msg = unpack_message(
                 self.buffer, header=header, hmac_key=hmac_key, logger=self
             )
-            self.buffer = self.buffer[header_len - 4 + header.length :]
+            self.buffer = self.buffer[header.total_length :]
             self._dispatch(msg)
 
     def _dispatch(self, msg):
@@ -601,6 +764,8 @@ class TuyaProtocol(asyncio.Protocol, ContextualLogger):
             self.dev_type = "type_0d"
         elif protocol_version == 3.4:
             self.dev_type = "v3.4"
+        elif protocol_version == 3.5:
+            self.dev_type = "v3.5"
 
     def error_json(self, number=None, payload=None):
         """Return error details in JSON."""
@@ -670,7 +835,9 @@ class TuyaProtocol(asyncio.Protocol, ContextualLogger):
     def connection_lost(self, exc):
         """Disconnected from device."""
         self.debug("Connection lost: %s", exc)
-        self.real_local_key = self.local_key
+        self.local_key = self.real_local_key
+        if self.dispatcher is not None:
+            self.dispatcher.local_key = self.local_key
         try:
             listener = self.listener and self.listener()
             if listener is not None:
@@ -681,7 +848,9 @@ class TuyaProtocol(asyncio.Protocol, ContextualLogger):
     async def close(self):
         """Close connection and abort all outstanding listeners."""
         self.debug("Closing connection")
-        self.real_local_key = self.local_key
+        self.local_key = self.real_local_key
+        if self.dispatcher is not None:
+            self.dispatcher.local_key = self.local_key
         if self.heartbeater is not None:
             self.heartbeater.cancel()
             try:
@@ -742,9 +911,10 @@ class TuyaProtocol(asyncio.Protocol, ContextualLogger):
 
     async def exchange(self, command, dps=None):
         """Send and receive a message, returning response from device."""
-        if self.version == 3.4 and self.real_local_key == self.local_key:
-            self.debug("3.4 device: negotiating a new session key")
-            await self._negotiate_session_key()
+        if self.version >= 3.4 and self.real_local_key == self.local_key:
+            self.debug("3.4 or 3.5 device: negotiating a new session key")
+            if not await self._negotiate_session_key():
+                return None
 
         self.debug(
             "Sending command %s (device type: %s)",
@@ -817,7 +987,7 @@ class TuyaProtocol(asyncio.Protocol, ContextualLogger):
         Args:
             dps([int]): list of dps to update, default=detected&whitelisted
         """
-        if self.version in [3.2, 3.3, 3.4]:  # 3.2 behaves like 3.3 with type_0d
+        if self.version in [3.2, 3.3, 3.4, 3.5]:  # 3.2 behaves like 3.3 with type_0d
             if dps is None:
                 if not self.dps_cache:
                     await self.detect_available_dps()
@@ -911,7 +1081,7 @@ class TuyaProtocol(asyncio.Protocol, ContextualLogger):
                 payload = payload[len(self.version_header) :]
                 # self.debug("removing type_0d 3.x header=%r", payload)
 
-            if self.version != 3.4:
+            if self.version < 3.4:
                 try:
                     # self.debug("decrypting=%r", payload)
                     payload = cipher.decrypt(payload, False)
@@ -936,11 +1106,12 @@ class TuyaProtocol(asyncio.Protocol, ContextualLogger):
                     # return self.error_json(ERR_JSON, payload)
 
             if "data unvalid" in payload:
-                self.dev_type = "type_0d"
-                self.debug(
-                    "'data unvalid' error detected: switching to dev_type %r",
-                    self.dev_type,
-                )
+                if self.version == 3.3:
+                    self.dev_type = "type_0d"
+                    self.debug(
+                        "'data unvalid' error detected: switching to dev_type %r",
+                        self.dev_type,
+                    )
                 return None
         elif not payload.startswith(b"{"):
             self.debug("Unexpected payload=%r", payload)
@@ -968,11 +1139,18 @@ class TuyaProtocol(asyncio.Protocol, ContextualLogger):
         return json_payload
 
     async def _negotiate_session_key(self):
+        self.remote_nonce = b""
         self.local_key = self.real_local_key
+        self.dispatcher.local_key = self.local_key
 
-        rkey = await self.exchange_quick(
-            MessagePayload(SESS_KEY_NEG_START, self.local_nonce), 2
-        )
+        try:
+            rkey = await self.exchange_quick(
+                MessagePayload(SESS_KEY_NEG_START, self.local_nonce), 2
+            )
+        except Exception:
+            self.debug("session key negotiation failed on step 1")
+            return False
+
         if not rkey or not isinstance(rkey, TuyaMessage) or len(rkey.payload) < 48:
             # error
             self.debug("session key negotiation failed on step 1")
@@ -985,18 +1163,19 @@ class TuyaProtocol(asyncio.Protocol, ContextualLogger):
             return False
 
         payload = rkey.payload
-        try:
-            # self.debug("decrypting %r using %r", payload, self.real_local_key)
-            cipher = AESCipher(self.real_local_key)
-            payload = cipher.decrypt(payload, False, decode_text=False)
-        except Exception as ex:
-            self.debug(
-                "session key step 2 decrypt failed, payload=%r with len:%d (%s)",
-                payload,
-                len(payload),
-                ex,
-            )
-            return False
+        if self.version == 3.4:
+            try:
+                # self.debug("decrypting %r using %r", payload, self.real_local_key)
+                cipher = AESCipher(self.real_local_key)
+                payload = cipher.decrypt(payload, False, decode_text=False)
+            except Exception as ex:
+                self.debug(
+                    "session key step 2 decrypt failed, payload=%r with len:%d (%s)",
+                    payload,
+                    len(payload),
+                    ex,
+                )
+                return False
 
         self.debug("decrypted session key negotiation step 2: payload=%r", payload)
 
@@ -1024,9 +1203,16 @@ class TuyaProtocol(asyncio.Protocol, ContextualLogger):
         # self.debug("Session nonce XOR'd: %r" % self.local_key)
 
         cipher = AESCipher(self.real_local_key)
-        self.local_key = self.dispatcher.local_key = cipher.encrypt(
-            self.local_key, False, pad=False
-        )
+        if self.version == 3.4:
+            self.local_key = self.dispatcher.local_key = cipher.encrypt(
+                self.local_key, False, pad=False
+            )
+        else:
+            iv = self.local_nonce[:12]
+            self.debug("Session IV: %r", iv)
+            self.local_key = self.dispatcher.local_key = cipher.encrypt(
+                self.local_key, use_base64=False, pad=False, iv=iv
+            )[12:28]
         self.debug("Session key negotiate success! session key: %r", self.local_key)
         return True
 
@@ -1035,12 +1221,27 @@ class TuyaProtocol(asyncio.Protocol, ContextualLogger):
         hmac_key = None
         payload = msg.payload
         self.cipher = AESCipher(self.local_key)
-        if self.version == 3.4:
+        if self.version >= 3.4:
             hmac_key = self.local_key
             if msg.cmd not in NO_PROTOCOL_HEADER_CMDS:
                 # add the 3.x header
                 payload = self.version_header + payload
             self.debug("final payload for cmd %r: %r", msg.cmd, payload)
+
+            if self.version >= 3.5:
+                msg = TuyaMessage(
+                    self.seqno,
+                    msg.cmd,
+                    None,
+                    payload,
+                    0,
+                    True,
+                    PREFIX_6699_VALUE,
+                    True,
+                )
+                self.seqno += 1  # increase message sequence number
+                return pack_message(msg, hmac_key=hmac_key)
+
             payload = self.cipher.encrypt(payload, False)
         elif self.version >= 3.2:
             # expect to connect and then disconnect to set new
