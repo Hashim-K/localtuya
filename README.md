@@ -20,11 +20,13 @@ HACS custom repository install:
 3. Install `LocalTuya HA 2026 fixes`.
 4. Restart Home Assistant.
 
-Release `v5.2.6-hk.2` includes:
+Release `v5.2.6-hk.3` includes:
 
 * Home Assistant 2026 dispatcher/thread-safety fixes.
 * `pytuya.DecodeError` local-key refresh handling.
 * Kelvin color-temperature support for RGB+CCT lights.
+* Tuya protocol 3.5 packet/session support backported from `hass-localtuya`.
+* Safer light color-mode handling when DP 21 is not reported.
 * HACS custom repository docs and local brand assets.
 
 
