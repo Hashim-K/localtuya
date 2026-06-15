@@ -9,6 +9,25 @@ The integration also supports the Tuya IoT Cloud APIs, for the retrieval of info
 **NOTE: The Cloud API account configuration is not mandatory (LocalTuya can work also without it) but is strongly suggested for easy retrieval (and auto-update after re-pairing a device) of local_keys. Cloud API calls are performed only at startup, and when a local_key update is needed.**
 
 
+## Fork notice
+
+This fork is maintained for local Home Assistant 2026 compatibility testing. It keeps the `localtuya` integration domain, so it replaces the upstream LocalTuya custom component and cannot be installed side-by-side with upstream LocalTuya.
+
+HACS custom repository install:
+
+1. In HACS, open Custom repositories.
+2. Add `https://github.com/Hashim-K/localtuya` as category `Integration`.
+3. Install `LocalTuya HA 2026 fixes`.
+4. Restart Home Assistant.
+
+Release `v5.2.6-hk.2` includes:
+
+* Home Assistant 2026 dispatcher/thread-safety fixes.
+* `pytuya.DecodeError` local-key refresh handling.
+* Kelvin color-temperature support for RGB+CCT lights.
+* HACS custom repository docs and local brand assets.
+
+
 The following Tuya device types are currently supported:
 * Switches
 * Lights
